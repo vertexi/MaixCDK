@@ -43,6 +43,11 @@
 
 #define IGN_SIGSEGV
 
+
+void touch_init();
+void touch_deinit();
+void touch_read(int *x, int *y, int *state);
+
 static volatile bool bStopCtl = false;
 static volatile bool bReleaseSendFrame = false;
 char *fbp;
@@ -351,6 +356,9 @@ _UNUSED static CVI_VOID startVdecFrameSendThread(pthread_t *pVdecThread,VDEC_THR
 	pthread_create(pVdecThread, &attr, sendFrame, (CVI_VOID *)pstVdecSend);
     printf("enter send frame thread, path:%s\n",pstVdecSend->cFileName);
 }
+
+unsigned char u8_rgb888_data_buf[800000];
+
 _UNUSED static void lcd_show_rgb565_384_288(char *dstAddr, VIDEO_FRAME_INFO_S stFrame){
   size_t image_size = stFrame.stVFrame.u32Length[0] + stFrame.stVFrame.u32Length[1] +
                       stFrame.stVFrame.u32Length[2];
@@ -361,49 +369,33 @@ _UNUSED static void lcd_show_rgb565_384_288(char *dstAddr, VIDEO_FRAME_INFO_S st
   stFrame.stVFrame.pu8VirAddr[2] =
       stFrame.stVFrame.pu8VirAddr[1] + stFrame.stVFrame.u32Length[1];
       
-  _UNUSED unsigned short color_rgb565;
   _UNUSED unsigned char *u8_rgb888_data = stFrame.stVFrame.pu8VirAddr[0];
-  _UNUSED uint16_t * fbp_16 = (uint16_t *) dstAddr;
-    /* 384 * 288 */
-    //368x552
-//   long index = 0;
-//   long lcd_index = 0;
-//   for (uint16_t iy = 0; iy < 288; iy ++) {
-//     for (uint16_t ix = 0; ix < 384; ix ++) {
-//         color_rgb565 = ((u8_rgb888_data[index]&0xf8)<<8)|((u8_rgb888_data[index + 1]&0xfc)<<3)|((u8_rgb888_data[index + 2]&0xf8)>>3);
-//         fbp_16[lcd_index] = color_rgb565;
-//         lcd_index++;
-//         index += 3;
-//     }
-//     // lcd_index += (480-384);
-//   }
+//   memcpy(u8_rgb888_data_buf, u8_rgb888_data, image_size);
+//   u8_rgb888_data = u8_rgb888_data_buf;
 
-    static unsigned char r_;
-    r_+=10;
-    if (r_ > 255)
-    {
-        r_ = 0;
+        static unsigned char r_;
+        r_+=10;
+        if (r_ > 255)
+        {
+            r_ = 0;
+        }
+
+    for (uint16_t ix = 0; ix < 320; ix++) {
+        long rgb_offset = ix * stFrame.stVFrame.u32Stride[0];
+        long index = 0;
+        long lcd_index = 368 * 4 * 480;
+        long lcd_offset = ix * 4;
+        char *fbp_ = fbp + lcd_offset + lcd_index;
+        long rgb_index = rgb_offset + index;
+        for (uint16_t iy = 0; iy < 480; iy++) {
+            *(fbp_ + 0) = u8_rgb888_data[rgb_index + 2];
+            *(fbp_ + 1) = u8_rgb888_data[rgb_index + 1];
+            *(fbp_ + 2) = u8_rgb888_data[rgb_index + 0];
+            *(fbp_ + 3) = 255;
+            fbp_ -= (368 * 4);
+            rgb_index += 3;
+        }
     }
-//   long rgb_stride = (368 * 3 + 64 - ((368 * 3) % 64));
-  for (uint16_t iy = 0; iy < 288; iy ++) {
-    long rgb_offset = iy * stFrame.stVFrame.u32Stride[0];
-    long lcd_offset = iy * 368 * 4;
-    long index = 0;
-    long lcd_index = 0;
-    for (uint16_t ix = 0; ix < 368; ix ++) {
-        
-        *(fbp + lcd_offset + lcd_index + 0) = u8_rgb888_data[rgb_offset + index + 2];
-        *(fbp + lcd_offset + lcd_index + 1) = u8_rgb888_data[rgb_offset + index + 1];
-        *(fbp + lcd_offset + lcd_index + 2) = u8_rgb888_data[rgb_offset + index + 0];
-        *(fbp + lcd_offset + lcd_index + 3) = 255;
-        // *(fbp + lcd_offset + lcd_index + 0) = 0;
-        // *(fbp + lcd_offset + lcd_index + 1) = 0;
-        // *(fbp + lcd_offset + lcd_index + 2) = r_;
-        // *(fbp + lcd_offset + lcd_index + 3) = 255;
-        lcd_index += 4;
-        index += 3;
-    }
-  }
 
     // {
     //     static unsigned char r_;
@@ -718,10 +710,47 @@ SendAgain:
     // int i_clock = 0;
     clock_t clock_arr[10];
     clock_t time, time_tmp;
+    static long touch_duration = 0;
+    static int64_t cur_pts = 0;
+    double seek_start_time = 0;
     time = clock();
     while (result >= 0 && !bStopCtl) {
         clock_arr[0] = clock();//----------------------------------------------------------------------------------------------------------
-
+        int touch_x, touch_y, touch_state;
+        touch_read(&touch_x, &touch_y, &touch_state);
+        double cur_time = cur_pts*av_q2d(fmt_ctx->streams[video_stream]->time_base);
+        // printf("realtime: %f\n", cur_time);
+        if (touch_state)
+        {
+            printf("touch: %d, %d, %d\n", touch_x, touch_y, touch_duration);
+            if (touch_y < 200 && ((cur_time - seek_start_time) > 5.0f))
+            {
+                touch_duration++;
+                if (touch_duration > 50)
+                {
+                    touch_duration = 0;
+                    seek_start_time = cur_time;
+                    int seek_res = av_seek_frame(fmt_ctx,
+                        video_stream,
+                        ((int64_t)cur_time + (int64_t)120) * fmt_ctx->streams[video_stream]->time_base.den,
+                        AVSEEK_FLAG_BACKWARD);
+                    printf("%d seek there.\n", seek_res);
+                }
+            } else if (touch_y > 300 && ((cur_time - seek_start_time) > 5.0f))
+            {
+                touch_duration++;
+                if (touch_duration > 50)
+                {
+                    touch_duration = 0;
+                    seek_start_time = cur_time;
+                    int seek_res = av_seek_frame(fmt_ctx,
+                        video_stream,
+                        ((int64_t)cur_time - (int64_t)120) * fmt_ctx->streams[video_stream]->time_base.den,
+                        AVSEEK_FLAG_BACKWARD);
+                    printf("%d seek there.\n", seek_res);
+                }
+            }
+        }
         result = av_read_frame(fmt_ctx, pkt);
         if (result >= 0 && pkt->stream_index != video_stream) {
             av_packet_unref(pkt);
@@ -744,6 +773,7 @@ SendAgain:
             if (pkt->pts == AV_NOPTS_VALUE)
                 pkt->pts = pkt->dts = i;
             result = _sendStream2Dec(pkt,false);
+            cur_pts = pkt->pts;
             cnt++;
         }
 
@@ -788,6 +818,8 @@ int main(int argc, char *argv[]){
 
 	if(argc == 1) return 0;
 
+    touch_init();
+
     _UNUSED CVI_S32 s32Ret;
 	{
 		MMF_VERSION_S stVersion;
@@ -798,8 +830,8 @@ int main(int argc, char *argv[]){
     if(srcSize.u32Width == 0 || srcSize.u32Height == 0) return 0;
     //368x552
     SIZE_S dstSize = { 
-        .u32Width = 368,
-        .u32Height = 288
+        .u32Width = 480,
+        .u32Height = 320
     };
     CVI_BOOL abChnEnable[VPSS_MAX_PHY_CHN_NUM + 1] = { true, true, 0, 0};
 
@@ -859,6 +891,7 @@ int main(int argc, char *argv[]){
     bReleaseSendFrame = true;
     pthread_join(sendStreamThread, NULL);
     printf("exit all thread down\n");
+    touch_deinit();
     // pthread_join(getDecImgThread, NULL);
 	// SAMPLE_COMM_VDEC_StopGetPic( &vdecThreadParm, &getDecPicThread);
 

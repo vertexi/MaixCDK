@@ -43,6 +43,13 @@
 
 #define IGN_SIGSEGV
 
+#include <time.h>
+static uint64_t _get_time_us(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
 
 void touch_init();
 void touch_deinit();
@@ -56,14 +63,12 @@ int fbfd = 0;
 unsigned int fbw = 0;
 unsigned int fbh = 0;
 
-void setup_framebuffer()
+int setup_framebuffer()
 {
 	struct fb_var_screeninfo vinfo;
     struct fb_fix_screeninfo finfo;
     long int screensize = 0;
     fbp = 0;
-    int x = 0, y = 0;
-    long int location = 0;
 
     fbfd = open("/dev/fb0", O_RDWR);
     if (fbfd == -1) {
@@ -98,7 +103,7 @@ void setup_framebuffer()
     }
     printf("The framebuffer device was mapped to memory successfully.\n");
 
-	printf("size %d\n", screensize);
+	printf("size %ld\n", screensize);
 	fbp_size = screensize;
 }
 
@@ -107,37 +112,6 @@ void deinit_framebuffer()
 	munmap(fbp, fbp_size);
     close(fbfd);
 }
-
-// static _UNUSED int lcd_init(){
-//   int fbfd = open("/dev/fb0", O_RDWR);
-//   if(fbfd == -1) {
-//       perror("Error: cannot open framebuffer device\n");
-//       return -1;
-//   }
-//   printf("The framebuffer device was opened successfully\n");
-//   static struct fb_var_screeninfo vinfo;
-//   static struct fb_fix_screeninfo finfo;
-//   // Get fixed screen information
-//   if(ioctl(fbfd, FBIOGET_FSCREENINFO, &finfo) == -1) {
-//       perror("Error reading fixed information");
-//       return -1;
-//   }
-
-//   // Get variable screen information
-//   if(ioctl(fbfd, FBIOGET_VSCREENINFO, &vinfo) == -1) {
-//       perror("Error reading variable information");
-//       return -1;
-//   }
-//   printf("%dx%d, %dbpp\n", vinfo.xres, vinfo.yres, vinfo.bits_per_pixel);
-//   int screensize = vinfo.xres*vinfo.yres*vinfo.bits_per_pixel/8;
-//   fbp = (char *)mmap(0, screensize, PROT_READ | PROT_WRITE, MAP_SHARED, fbfd, 0);
-//   if((intptr_t)fbp == -1) {
-//       perror("Error: failed to map framebuffer device to memory");
-//       return -1;
-//   }
-//   return 0;
-// }
-
 
 static void SampleHandleSig(CVI_S32 signo) {
   signal(SIGINT, SIG_IGN);
@@ -357,45 +331,81 @@ _UNUSED static CVI_VOID startVdecFrameSendThread(pthread_t *pVdecThread,VDEC_THR
     printf("enter send frame thread, path:%s\n",pstVdecSend->cFileName);
 }
 
-unsigned char u8_rgb888_data_buf[800000];
+volatile unsigned char u8_rgb888_data_buf[800000];
 
-_UNUSED static void lcd_show_rgb565_384_288(char *dstAddr, VIDEO_FRAME_INFO_S stFrame){
-  size_t image_size = stFrame.stVFrame.u32Length[0] + stFrame.stVFrame.u32Length[1] +
-                      stFrame.stVFrame.u32Length[2];
-  stFrame.stVFrame.pu8VirAddr[0] =
-      (uint8_t *)CVI_SYS_Mmap(stFrame.stVFrame.u64PhyAddr[0], image_size);
-  stFrame.stVFrame.pu8VirAddr[1] =
-      stFrame.stVFrame.pu8VirAddr[0] + stFrame.stVFrame.u32Length[0];
-  stFrame.stVFrame.pu8VirAddr[2] =
-      stFrame.stVFrame.pu8VirAddr[1] + stFrame.stVFrame.u32Length[1];
-      
-  _UNUSED unsigned char *u8_rgb888_data = stFrame.stVFrame.pu8VirAddr[0];
-//   memcpy(u8_rgb888_data_buf, u8_rgb888_data, image_size);
-//   u8_rgb888_data = u8_rgb888_data_buf;
+volatile static uint64_t rgb_offset_vector[320];
+volatile static bool first_time = true;
 
-        static unsigned char r_;
-        r_+=10;
-        if (r_ > 255)
-        {
-            r_ = 0;
-        }
+
+static void lcd_show_rgb565_384_288(char *dstAddr, VIDEO_FRAME_INFO_S stFrame){
+    size_t image_size = stFrame.stVFrame.u32Length[0] + stFrame.stVFrame.u32Length[1] +
+                        stFrame.stVFrame.u32Length[2];
+    stFrame.stVFrame.pu8VirAddr[0] =
+        (uint8_t *)CVI_SYS_Mmap(stFrame.stVFrame.u64PhyAddr[0], image_size);
+    CVI_SYS_IonInvalidateCache(stFrame.stVFrame.u64PhyAddr[0], stFrame.stVFrame.pu8VirAddr[0], image_size);
+    stFrame.stVFrame.pu8VirAddr[1] =
+        stFrame.stVFrame.pu8VirAddr[0] + stFrame.stVFrame.u32Length[0];
+    stFrame.stVFrame.pu8VirAddr[2] =
+        stFrame.stVFrame.pu8VirAddr[1] + stFrame.stVFrame.u32Length[1];
+
+    unsigned char *u8_rgb888_data = stFrame.stVFrame.pu8VirAddr[0];
+    memcpy(u8_rgb888_data_buf, u8_rgb888_data, image_size);
+    // for (uint64_t i = 0; i < image_size; i++)
+    // {
+    //     u8_rgb888_data_buf[i] = u8_rgb888_data[i];
+    // }
+    // u8_rgb888_data = u8_rgb888_data_buf;
+
+    // static unsigned char r_;
+    // r_+=10;
+    // if (r_ > 255)
+    // {
+    //     r_ = 0;
+    // }
+
+    uint16_t rgb_stride = stFrame.stVFrame.u32Stride[0];
+    long lcd_index = 368 * 4 * 480;
 
     for (uint16_t ix = 0; ix < 320; ix++) {
-        long rgb_offset = ix * stFrame.stVFrame.u32Stride[0];
-        long index = 0;
-        long lcd_index = 368 * 4 * 480;
+        long rgb_offset = ix * rgb_stride;
         long lcd_offset = ix * 4;
         char *fbp_ = fbp + lcd_offset + lcd_index;
-        long rgb_index = rgb_offset + index;
+        long rgb_index = rgb_offset;
+        char *u8_rgb888_data_buf_ = u8_rgb888_data;
         for (uint16_t iy = 0; iy < 480; iy++) {
-            *(fbp_ + 0) = u8_rgb888_data[rgb_index + 2];
-            *(fbp_ + 1) = u8_rgb888_data[rgb_index + 1];
-            *(fbp_ + 2) = u8_rgb888_data[rgb_index + 0];
-            *(fbp_ + 3) = 255;
+            fbp_[0] = u8_rgb888_data_buf_[rgb_index + 2];
+            fbp_[1] = u8_rgb888_data_buf_[rgb_index + 1];
+            fbp_[2] = u8_rgb888_data_buf_[rgb_index + 0];
+            fbp_[3] = 255;
             fbp_ -= (368 * 4);
             rgb_index += 3;
         }
     }
+
+    // if (first_time)
+    // {
+    //     for (uint64_t ix = 0; ix < 320; ix++)
+    //     {
+    //         rgb_offset_vector[ix] = ix * rgb_stride;
+    //     }
+    //     first_time = false;
+    // }
+
+
+    // for(uint16_t iy = 0; iy < 480; iy++)
+    // {
+    //     char *fbp_ = fbp + 368 * iy * 4;
+    //     int fbp_index = 0;
+    //     int rgb_index = iy * 3;
+    //     for(uint16_t ix = 0; ix < 320; ix++)
+    //     {
+    //         *(fbp_ + fbp_index + 0) = *(u8_rgb888_data + rgb_offset_vector[ix] + rgb_index + 2); // blue
+    //         *(fbp_ + fbp_index + 1) = *(u8_rgb888_data + rgb_offset_vector[ix] + rgb_index + 1); // green
+    //         *(fbp_ + fbp_index + 2) = *(u8_rgb888_data + rgb_offset_vector[ix] + rgb_index + 0); // red
+    //         *(fbp_ + fbp_index + 3) = 255; // transparency
+    //         fbp_index += 4;
+    //     }
+    // }
 
     // {
     //     static unsigned char r_;
@@ -691,7 +701,7 @@ SendAgain:
     }
 
     printf("pix_fmt:%d\n",ctx->pix_fmt);
-    
+
     // byte_buffer_size = av_image_get_buffer_size(ctx->pix_fmt, ctx->width, ctx->height, 16);
     byte_buffer_size = av_image_get_buffer_size( AV_PIX_FMT_RGB565LE, 480, 320, 16);
     // byte_buffer = (uint8_t*)fbp;
@@ -703,6 +713,10 @@ SendAgain:
     //     pthread_exit(NULL);
     // }
 
+    double videoFPS = av_q2d(fmt_ctx->streams[video_stream]->r_frame_rate);
+    printf("fps: %f", videoFPS);
+    int64_t time_interval = (int64_t)((double)(1 / videoFPS) * 1000.0f * 1000.0f);
+
     printf("#tb %d: %d/%d\n", video_stream, fmt_ctx->streams[video_stream]->time_base.num, fmt_ctx->streams[video_stream]->time_base.den);
     i = 0;
 
@@ -710,42 +724,49 @@ SendAgain:
     // int i_clock = 0;
     clock_t clock_arr[10];
     clock_t time, time_tmp;
-    static long touch_duration = 0;
+    static int touch_duration = 0;
     static int64_t cur_pts = 0;
     double seek_start_time = 0;
     time = clock();
+    uint64_t enter_time = (double)_get_time_us();
+    double diff_time;
+    double prediff_time = 0;
     while (result >= 0 && !bStopCtl) {
         clock_arr[0] = clock();//----------------------------------------------------------------------------------------------------------
         int touch_x, touch_y, touch_state;
         touch_read(&touch_x, &touch_y, &touch_state);
         double cur_time = cur_pts*av_q2d(fmt_ctx->streams[video_stream]->time_base);
-        // printf("realtime: %f\n", cur_time);
+        prediff_time = diff_time;
+        diff_time = cur_time - (double)(_get_time_us()-enter_time)/1000000;
+        printf("realtime: %f\n", cur_time);
+        printf("difftime: %f %ld\n", diff_time, time_interval);
+        // time_interval -= (prediff_time - diff_time)*1000000.0f;
         if (touch_state)
         {
             printf("touch: %d, %d, %d\n", touch_x, touch_y, touch_duration);
-            if (touch_y < 200 && ((cur_time - seek_start_time) > 5.0f))
+            if (touch_x < 200 && ((cur_time - seek_start_time) > 5.0f))
             {
                 touch_duration++;
                 if (touch_duration > 50)
                 {
                     touch_duration = 0;
-                    seek_start_time = cur_time;
+                    seek_start_time = cur_time - 120;
                     int seek_res = av_seek_frame(fmt_ctx,
                         video_stream,
-                        ((int64_t)cur_time + (int64_t)120) * fmt_ctx->streams[video_stream]->time_base.den,
+                        ((int64_t)seek_start_time) * fmt_ctx->streams[video_stream]->time_base.den,
                         AVSEEK_FLAG_BACKWARD);
                     printf("%d seek there.\n", seek_res);
                 }
-            } else if (touch_y > 300 && ((cur_time - seek_start_time) > 5.0f))
+            } else if (touch_x > 400 && ((cur_time - seek_start_time) > 5.0f))
             {
                 touch_duration++;
                 if (touch_duration > 50)
                 {
                     touch_duration = 0;
-                    seek_start_time = cur_time;
+                    seek_start_time = cur_time + 120;
                     int seek_res = av_seek_frame(fmt_ctx,
                         video_stream,
-                        ((int64_t)cur_time - (int64_t)120) * fmt_ctx->streams[video_stream]->time_base.den,
+                        ((int64_t)seek_start_time) * fmt_ctx->streams[video_stream]->time_base.den,
                         AVSEEK_FLAG_BACKWARD);
                     printf("%d seek there.\n", seek_res);
                 }
@@ -759,7 +780,7 @@ SendAgain:
         clock_arr[1] = clock();//----------------------------------------------------------------------------------------------------------
 
         time_tmp = clock();
-        while(time_tmp - time <= 20000){
+        while(time_tmp - time <= 23000){
             time_tmp = clock();
             usleep(100);
         }
